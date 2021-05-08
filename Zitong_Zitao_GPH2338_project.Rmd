@@ -1,0 +1,270 @@
+---
+title: "GPH-GU2338 Final Project"
+author: "zz3449 Zitao Zheng, zw2929 Zitong Wang"
+date: "4/21/2021"
+output:
+  pdf_document: default
+  html_document: default
+bibliography: reference.bib
+---
+
+# Background 
+
+Nowadays, diabetes had become one of the most serve chronic health condition that challenging the well-being of human. Based on that motivation, in our project, we would like to discover whether there exists a relationship between diabetes and people's socio-economic status (i.e family income, education background and etc.) or not by comparing 3 existing classification methods (logistic regression, KNN and random forest).
+
+```{r pacakges, message=FALSE, warning=FALSE, echo=FALSE}
+
+library(tidyverse)
+library(dslabs)
+library(dplyr)
+library(leaps)
+library(glmnet)
+library(MASS)
+library(class)
+library(randomForest)
+
+```
+
+# Feastures in out Dataset
+
+```{r setup, warning=FALSE, message=FALSE, echo=FALSE}
+## import dataset
+library(readxl)
+GSS <- read_excel("~/Desktop/GPH-GU2338/Project/diabetes_dat/GSS.xls", 
+                  col_types = c("numeric", "numeric", "numeric", 
+                                "text", "text", "text", "text", "text", 
+                                "text"))
+gss <- GSS
+## check variables
+gss <-gss[, -8]
+
+## change variable names
+names(gss) <- c("age","educ","maeduc","race","income","hyperten","diabetes","gender1")
+
+## Recode variable
+gss$age <- as.numeric(gss$age)
+gss$educ <- as.numeric(gss$educ)
+gss$maeduc <- as.numeric(gss$maeduc)
+gss$diabetes <- ifelse(gss$diabetes == "Yes", 1, 0)
+
+gss$race <- factor(gss$race, levels = c("White","Black","Other"), labels = c(1,2,3))
+gss$income <- factor(gss$income, levels = c("Lt $1000","$1000 to 2999", "$3000 to 3999", "$4000 to 4999", "$5000 to 5999", "$6000 to 6999", "$7000 to 7999", "8000 to 9999", "$10000 - 14999", "$15000 - 19999", "$20000 - 24999", "$25000 or more"),labels = c(1,2,3,4,5,6,7,8,9,10,11,12))
+
+## remove NAs
+gss <- replace(gss, gss == 'Refused', NA)
+gss <- replace(gss, gss == "Don't know", NA)
+gss <- replace(gss, gss == 'No answer', NA)
+gss <- replace(gss, gss == "Not applicable", NA)
+
+gss <- gss %>% na.omit()
+
+head(gss)
+
+# summary of the dataset
+summary(gss)
+
+```
+
+# Model Fitting and Results
+
+## Logsitic Regression
+
+```{r glm}
+
+attach(gss)
+set.seed(1)
+
+# split training and test set
+
+train_ind <- sample(nrow(gss), 0.7*nrow(gss))
+train_set <- gss[train_ind,]
+test_set <- gss[-train_ind,]
+
+# fit the model first
+glm.fit <- glm(diabetes ~ ., data = train_set, family = "binomial")
+summary(glm.fit)
+
+## age is significant, education year is somewhat significant, prior hypertension history is significant
+
+# prediction 
+
+glm.pred <- predict(glm.fit, newdata = test_set, type = "response")
+glm.pred <- ifelse(glm.pred > 0.5, 1, 0)
+
+test_err <- mean(glm.pred != test_set$diabetes)
+
+```
+
+The test error that computed for logistic regression is: `r test_err`
+
+## Variable Selection of Logistic Regression
+
+@Wiley78 had mentioned that, for logistic regression, instead of using stepwise/best subset selection (since $R^2$ is not an proper goodness-of-fit measure of logistic regression), the plausible model selection method that we should consider is based on maximum likelihood method, It should be plausible by using **bestglm library**. However, based on the knowledge of the scope of our class we will perform the selection using lasso and cross-validation.
+
+```{r variable_selection lasso}
+set.seed(1)
+
+# this will also create dummy version of the factorized variable
+x.gss <- model.matrix(diabetes ~ ., data = gss)[,-1]
+
+# we set learning rate = 1
+cv.lasso <- cv.glmnet(x.gss, diabetes, alpha = 1)
+
+diabetes.lambda <- cv.lasso$lambda.min
+
+# we can fit the model with best lambda that obtained above
+
+glmfit.lasso <- glmnet(x.gss, diabetes, alpha = 1)
+predict(glmfit.lasso, s = diabetes.lambda, type = "coefficients")
+```
+
+From the process we mentioned previously, the best lambda value that we have for selection is: `r diabetes.lambda`. Based on the prediction, the variables that chose are: **age, educ, income6 (5000 - 5999), income12 (20000 - 24999), hypertenYes, gender1Male**.
+
+## Linear Discriminant Analysis and Quadratic Discriminant Analysis
+
+We will use the variables that selected above for this section.
+
+### LDA
+
+```{r lda}
+
+# based on the previous variables selection process
+lda.fit <- lda(diabetes ~ educ + age + hyperten + gender1, 
+               data = train_set, family = "binomial")
+lda.pred <- predict(lda.fit, test_set, type = "response")
+
+# test error rate:
+test_err2 <- mean(lda.pred$class != test_set$diabetes)
+```
+
+The test error rate for classification using LDA method is: `r test_err2`
+
+### QDA
+
+```{r qda}
+
+# based on the previous variables selection process
+qda.fit <- qda(diabetes ~ educ + age + hyperten + gender1, data = train_set, family = "binomial")
+qda.pred <- predict(qda.fit, test_set, type = "response")
+
+# test error rate:
+test_err3 <- mean(qda.pred$class != test_set$diabetes)
+```
+
+The test error rate for classification using QDA method is: `r test_err3`
+
+## KNN with Cross Validation
+
+First we will choose a best K from 1 to 10, the corresponding plot is:
+```{r knn}
+
+x.knn <- model.matrix(diabetes ~ ., data = gss)[,-1]
+train.X <- x.knn[train_ind,]
+test.X <- x.knn[-train_ind,]
+train.Diabetes <- diabetes[train_ind]
+
+neighbours <- rep(0, 10)
+testerr <- rep(0, 10)
+k <- rep(0,10)
+
+for (i in 1:10) {
+  k[i] <- i
+  testerr[i] <- mean(knn(train = train.X, test = test.X, cl = train.Diabetes, k = i)
+                     != diabetes[-train_ind])
+}
+
+plot(k, testerr, xlab = "Number of Neighbours", ylab = "Test Error Rate")
+
+min_err_k <- which.min(testerr)
+min_err <- min(testerr)
+
+
+```
+The k that helped achieving the minimum test error rate is K = `r min_err_k`, the minimum test error rate that we have is: `r min_err`
+
+## Random Forest and Bagging
+
+For the purpose of randomization control, we will run each method 10 times then compute the average test error rate.
+
+### Random Forest
+
+The plot that describing the number of trees and training error is:
+
+```{r randomForest, echo = FALSE, warning=FALSE}
+
+set.seed(1)
+
+rf.fit <- randomForest(diabetes ~., data = train_set, mtry = 4)
+plot(rf.fit)
+
+# to compute test error rate
+rf.pred <- predict(rf.fit, newdata = test_set, type = "response")
+rf.pred <-ifelse(rf.pred > mean(rf.pred), 1, 0)
+
+test_err4 <- mean(test_set$diabetes != rf.pred)
+
+```
+
+The test error rate for classification using random forest is: `r test_err4`
+
+### Bagging
+
+The plot that describing the number of trees and training error is:
+
+```{r bagging, echo = FALSE, warning=FALSE}
+
+set.seed(1)
+
+bg.fit <- randomForest(diabetes ~., data = train_set, mtry = 7)
+plot(bg.fit)
+
+# to compute test error rate
+bg.pred <- predict(bg.fit, newdata = test_set, type = "response")
+bg.pred <-ifelse(bg.pred > mean(bg.pred), 1, 0)
+
+test_err5 <- mean(test_set$diabetes != bg.pred)
+
+```
+
+The test error rate for classification using random forest is: `r test_err5`
+
+# Conclusion
+
+A kabble showing the methods' names and its test error rate? 
+Then some conclusive sentences (ie what is the best classifier? what variables contribute the most to the determination of the diabetes?)
+
+# Discussion
+
+Limitation of the data set? clinical data from the hospital might be more accurate. Lack of diabetes related knowledge? determination of variables to use might be biased. etc.
+
+
+
+# Reference
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
